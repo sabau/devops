@@ -1,0 +1,115 @@
+#!/bin/bash
+
+# A POSIX variable
+confpath=
+crtpath=
+usage()
+{
+    printf "Usage: %s: [-a for Apache or -n for Nginx] [-p path] args\n"  $0
+}
+
+while getopts "p:an" opt; do
+    case "$opt" in
+        p)
+            echo "Action: $OPTARG"
+            confpath="$OPTARG" ;;
+        n) crtpath='/etc/nginx/ssl/' ;;
+        a) crtpath='/etc/apache2/certs/' ;;
+        ?)
+            usage
+            exit 0;;
+    esac
+done
+shift $(($OPTIND - 1))
+
+if [ -z "$confpath" ]
+then
+   usage
+   exit 1
+fi
+
+
+
+
+input_file() {
+        tmpfile=$(mktemp /tmp/crt.XXXXXX)
+        data=$(/usr/bin/sudo dialog --title " $1 $2 " --backtitle " $backtitle " --editbox $tmpfile 20 60 3>&1 1>&2 2>&3)
+        exit=$?
+        if [ ! ${exit} = 0 ]; then
+                return
+        fi
+        ret=$?
+        if [ ${ret} = 0 ]; then
+                /usr/bin/sudo /bin/bash -c "cat > $tmpfile << EOL
+$data
+EOL"
+        fi
+}
+
+verify_certificate() {
+	input_file Insert Certificate
+	while true
+	do
+		check_crt=$(openssl x509 -noout -subject -in $tmpfile | sed -n '/^subject/s/^.*CN=//p')
+		find_host=$(grep .$check_crt $confpath|awk '{print $2}')
+		if [ ! -z "$find_host" ]
+		then
+			mv $tmpfile $crtpath/$find_host.$(date +"%Y").crt
+			return 
+		else
+			echo "Certificate does not match any hostnames"
+			rm -f "$tmpfile" 
+			unset check_crt
+			whiptail --title "TLS/SSL Certificate" --msgbox "Certificate does not match any hostnames" 30 60  3>&1 1>&2 2>&3
+			input_file Insert Certificate
+		fi
+	done
+}
+
+verify_intermediate() {
+	input_file Insert CAFile
+	exit=$?
+	while true
+	do
+		check_intermediate=$(openssl verify -CAfile $tmpfile $crtpath/$find_host.$(date +"%Y").crt 2>&1 >/dev/null)
+		if [ ${exit} = 0 ]; then
+			mv $tmpfile $crtpath/$find_host.intermediate.$(date +"%Y").crt
+			return 
+		else
+			echo "Certificate CA is incorrect"  
+			rm -f "$tmpfile" 
+			unset check_intermediate
+			whiptail --title "TLS/SSL Certificate" --msgbox "Certificate CA is incorrect" 30 60  3>&1 1>&2 2>&3
+			input_file Insert CAFile
+		fi
+	done
+}
+
+verify_key() {
+	key_count=0
+	input_file Insert PemKey
+	control_cert=$(openssl x509 -noout -modulus -in $crtpath/$find_host.$(date +"%Y").crt |md5sum -|awk '{print $1}')
+	control_key=$(openssl rsa -noout -modulus -in $tmpfile |md5sum -|awk '{print $1}')
+	while true
+	do
+		control_cert=$(openssl x509 -noout -modulus -in $crtpath/$find_host.$(date +"%Y").crt |md5sum -|awk '{print $1}')
+		control_key=$(openssl rsa -noout -modulus -in $tmpfile |md5sum -|awk '{print $1}')
+		if [ ${control_key} == ${control_cert} ]; then
+			mv $tmpfile $crtpath/$find_host.$(date +"%Y").key
+			echo $control_cert
+			echo $control_key
+			return
+		else
+			echo "Certificate Key is incorrect"
+			rm -f "$tmpfile"
+			unset check_key
+			whiptail --title "TLS/SSL Certificate" --msgbox "Certificate Key is incorrect" 30 60  3>&1 1>&2 2>&3
+			input_file Insert PemKey
+		fi
+		key_count=$(($key_count+1))
+	done
+}
+
+verify_certificate
+verify_key
+verify_intermediate
